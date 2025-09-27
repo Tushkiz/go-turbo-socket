@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
 	"time"
@@ -24,13 +25,16 @@ var upgrader = websocket.Upgrader{
 }
 
 type Connection struct {
-	hub  *Hub
-	ws   *websocket.Conn
-	send chan []byte
-	log  *log.Logger
+	hub    *Hub
+	ws     *websocket.Conn
+	send   chan []byte
+	log    *log.Logger
+	UserID string
 }
 
 func ServeWS(h *Hub, logger *log.Logger, w http.ResponseWriter, r *http.Request) {
+	userID := r.URL.Query().Get("user")
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		logger.Printf("upgrade failed: %v", err)
@@ -38,10 +42,11 @@ func ServeWS(h *Hub, logger *log.Logger, w http.ResponseWriter, r *http.Request)
 	}
 
 	c := &Connection{
-		hub:  h,
-		ws:   conn,
-		send: make(chan []byte, 256),
-		log:  logger,
+		hub:    h,
+		ws:     conn,
+		send:   make(chan []byte, 256),
+		log:    logger,
+		UserID: userID,
 	}
 
 	h.Register(c)
@@ -50,10 +55,23 @@ func ServeWS(h *Hub, logger *log.Logger, w http.ResponseWriter, r *http.Request)
 	c.readLoop()
 }
 
+func (c *Connection) Enqueue(payload []byte) {
+	select {
+	case c.send <- payload:
+	default:
+		c.log.Printf("dropping message for user=%s: send buffer full", c.UserID)
+		if c.ws != nil {
+			c.ws.Close()
+		}
+	}
+}
+
 func (c *Connection) readLoop() {
 	defer func() {
 		c.hub.Unregister(c)
-		c.ws.Close()
+		if c.ws != nil {
+			c.ws.Close()
+		}
 	}()
 
 	c.ws.SetReadLimit(maxMessageSize)
@@ -63,6 +81,12 @@ func (c *Connection) readLoop() {
 		return nil
 	})
 
+	type inbound struct {
+		Type string          `json:"type"`
+		To   []string        `json:"to"`
+		Body json.RawMessage `json:"body"`
+	}
+
 	for {
 		_, message, err := c.ws.ReadMessage()
 		if err != nil {
@@ -70,6 +94,19 @@ func (c *Connection) readLoop() {
 				c.log.Printf("read error: %v", err)
 			}
 			break
+		}
+
+		c.log.Printf("read message: %s", string(message))
+
+		var msg inbound
+		if err := json.Unmarshal(message, &msg); err != nil {
+			c.log.Printf("broadcast decode failed: %v", err)
+		} else {
+			c.log.Printf("parsed inbound type=%s targets=%v", msg.Type, msg.To)
+			if msg.Type == "broadcast" {
+				c.hub.Broadcast(Broadcast{TargetUsers: msg.To, Payload: msg.Body})
+				continue
+			}
 		}
 
 		c.send <- message // echo

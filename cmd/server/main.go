@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -12,9 +13,15 @@ import (
 	"github.com/tushkiz/go-turbo-socket/internal/server"
 )
 
+type broadcastRequest struct {
+	Targets []string        `json:"targets"` // empty slice => broadcast to everybody
+	Payload json.RawMessage `json:"payload"`
+}
+
 func main() {
 	logger := log.New(os.Stdout, "[ws-server] ", log.LstdFlags|log.Lshortfile)
 	hub := server.NewHub()
+	go hub.Run(logger)
 
 	mux := http.NewServeMux()
 
@@ -25,6 +32,27 @@ func main() {
 	})
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		server.ServeWS(hub, logger, w, r)
+	})
+	mux.HandleFunc("/broadcast", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req broadcastRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			logger.Printf("invalid request payload: %s", r.Body)
+			return
+		}
+		logger.Printf("broadcast request payload: %s", string(req.Payload))
+
+		hub.Broadcast(server.Broadcast{
+			TargetUsers: req.Targets,
+			Payload:     req.Payload,
+		})
+
+		w.WriteHeader(http.StatusAccepted)
 	})
 
 	srv := &http.Server{
