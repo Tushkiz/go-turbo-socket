@@ -8,10 +8,13 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/tushkiz/go-turbo-socket/internal/server"
 )
 
 func main() {
 	logger := log.New(os.Stdout, "[ws-server] ", log.LstdFlags|log.Lshortfile)
+	hub := server.NewHub()
 
 	mux := http.NewServeMux()
 
@@ -19,6 +22,9 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		server.ServeWS(hub, logger, w, r)
 	})
 
 	srv := &http.Server{
